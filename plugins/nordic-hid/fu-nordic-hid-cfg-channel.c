@@ -717,6 +717,7 @@ fu_nordic_hid_cfg_channel_dfu_sync_cb(FuDevice *device, gpointer user_data, GErr
 						0,
 						error))
 		return FALSE;
+
 	if (!fu_nordic_hid_cfg_channel_cmd_receive(self, CONFIG_STATUS_SUCCESS, recv_msg, error))
 		return FALSE;
 
@@ -731,8 +732,8 @@ fu_nordic_hid_cfg_channel_dfu_sync_cb(FuDevice *device, gpointer user_data, GErr
 		g_set_error(error,
 			    FWUPD_ERROR,
 			    FWUPD_ERROR_READ,
-			    "received status: 0x%02x, expected: 0x%02x",
-			    recv_msg->status,
+			    "sync received status: 0x%02x, expected: 0x%02x",
+			    recv_msg->data[0],
 			    args->status);
 		return FALSE;
 	}
