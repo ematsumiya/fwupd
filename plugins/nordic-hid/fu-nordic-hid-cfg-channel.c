@@ -15,7 +15,6 @@
 
 #include "fu-nordic-hid-archive.h"
 #include "fu-nordic-hid-cfg-channel.h"
-#include "fu-nordic-hid-firmware-b0.h"
 
 #define HID_REPORT_ID	     6
 #define REPORT_SIZE	     30
@@ -25,7 +24,7 @@
 #define INVALID_PEER_ID	     0xFF
 
 #define FU_NORDIC_HID_CFG_CHANNEL_RETRIES	  10
-#define FU_NORDIC_HID_CFG_CHANNEL_RETRY_DELAY	  100 /* ms */
+#define FU_NORDIC_HID_CFG_CHANNEL_RETRY_DELAY	  50  /* ms */
 #define FU_NORDIC_HID_CFG_CHANNEL_DFU_RETRY_DELAY 500 /* ms */
 
 typedef enum {
@@ -144,11 +143,33 @@ fu_nordic_hid_cfg_channel_receive(FuNordicHidCfgChannel *self,
 				  gsize bufsz,
 				  GError **error)
 {
+	g_autoptr(FuNordicCfgChannelMsg) recv_msg = g_new0(FuNordicCfgChannelMsg, 1);
+
 #ifdef HAVE_HIDRAW_H
-	/* FIXME: temporary fix to avoid delays on newer FWres */
-	g_usleep(50);
-	if (!fu_udev_device_ioctl(FU_UDEV_DEVICE(self), HIDIOCGFEATURE(bufsz), buf, NULL, error))
+	for (gint i = 1; i < 10; i++) {
+		recv_msg->report_id = HID_REPORT_ID;
+		if (!fu_udev_device_ioctl(FU_UDEV_DEVICE(self),
+					  HIDIOCGFEATURE(sizeof(*recv_msg)),
+					  (guint8 *)recv_msg,
+					  NULL,
+					  error))
+			return FALSE;
+		/* if the device is busy it return 06 00 00 00 00 response */
+		if (buf[0] == 06 && (buf[1] + buf[2] + buf[3] + buf[4] != 0))
+			break;
+		g_usleep(i * 50);
+	}
+	if (!fu_memcpy_safe(buf,
+			    bufsz,
+			    0,
+			    (guint8 *)recv_msg,
+			    sizeof(*recv_msg),
+			    0,
+			    sizeof(*recv_msg),
+			    error)) {
 		return FALSE;
+	}
+
 	if (g_getenv("FWUPD_NORDIC_HID_VERBOSE") != NULL)
 		fu_common_dump_raw(G_LOG_DOMAIN, "Received", buf, bufsz);
 	/*
@@ -475,6 +496,11 @@ fu_nordic_hid_cfg_channel_get_bl_name(FuNordicHidCfgChannel *self, GError **erro
 		return FALSE;
 	}
 
+	/* always use the bank 0 for MCUBOOT bootloader */
+	if (g_strcmp0(self->bl_name, "MCUBOOT") == 0) {
+		self->flash_area_id = 0;
+	}
+
 	/* success */
 	return TRUE;
 }
@@ -706,28 +732,42 @@ fu_nordic_hid_cfg_channel_dfu_sync_cb(FuDevice *device, gpointer user_data, GErr
 {
 	FuNordicHidCfgChannel *self = FU_NORDIC_HID_CFG_CHANNEL(device);
 	FuNordicCfgChannelRcvHelper *args = (FuNordicCfgChannelRcvHelper *)user_data;
-	FuNordicCfgChannelMsg *recv_msg = (FuNordicCfgChannelMsg *)args->buf;
+	g_autoptr(FuNordicCfgChannelMsg) recv_msg = g_new0(FuNordicCfgChannelMsg, 1);
 
-	if (!fu_nordic_hid_cfg_channel_cmd_send(self,
-						self->peer_id,
-						"dfu",
-						"sync",
-						CONFIG_STATUS_FETCH,
-						NULL,
-						0,
-						error))
-		return FALSE;
+	/* allow to sync buffer more precisely and without annoying messages
+	 * it may take some time and depending on device workload */
+	for (gint i = 1; i < 30; i++) {
+		if (!fu_nordic_hid_cfg_channel_cmd_send(self,
+							self->peer_id,
+							"dfu",
+							"sync",
+							CONFIG_STATUS_FETCH,
+							NULL,
+							0,
+							error))
+			return FALSE;
 
-	if (!fu_nordic_hid_cfg_channel_cmd_receive(self, CONFIG_STATUS_SUCCESS, recv_msg, error))
-		return FALSE;
-
-	if (recv_msg->data_len != 0x0F) {
-		g_set_error_literal(error,
-				    G_IO_ERROR,
-				    G_IO_ERROR_NOT_SUPPORTED,
-				    "incorrect length of reply");
-		return FALSE;
+		recv_msg->report_id = HID_REPORT_ID;
+		g_usleep(i * 5000);
+		if (!fu_nordic_hid_cfg_channel_receive(self,
+						       (guint8 *)recv_msg,
+						       sizeof(*recv_msg),
+						       error)) {
+			return FALSE;
+		}
+		if (recv_msg->data_len != 0x0F) {
+			g_set_error_literal(error,
+					    G_IO_ERROR,
+					    G_IO_ERROR_NOT_SUPPORTED,
+					    "incorrect length of reply");
+			return FALSE;
+		}
+		if (recv_msg->data[0] == DFU_STATE_INACTIVE ||
+		    recv_msg->data[0] == DFU_STATE_ACTIVE) {
+			break;
+		}
 	}
+
 	if (recv_msg->data[0] != args->status) {
 		g_set_error(error,
 			    FWUPD_ERROR,
@@ -738,8 +778,14 @@ fu_nordic_hid_cfg_channel_dfu_sync_cb(FuDevice *device, gpointer user_data, GErr
 		return FALSE;
 	}
 
-	/* success */
-	return TRUE;
+	return fu_memcpy_safe(args->buf,
+			      args->bufsz,
+			      0,
+			      (guint8 *)recv_msg,
+			      sizeof(*recv_msg),
+			      0,
+			      sizeof(*recv_msg),
+			      error);
 }
 
 static gboolean
@@ -864,8 +910,7 @@ static gboolean
 fu_nordic_hid_cfg_channel_setup(FuDevice *device, GError **error)
 {
 	FuNordicHidCfgChannel *self = FU_NORDIC_HID_CFG_CHANNEL(device);
-	g_autofree gchar *devid0 = NULL;
-	g_autofree gchar *devid1 = NULL;
+	g_autofree gchar *target_id = NULL;
 
 	if (!fu_nordic_hid_cfg_channel_index_peers(self, error))
 		return FALSE;
@@ -882,20 +927,13 @@ fu_nordic_hid_cfg_channel_setup(FuDevice *device, GError **error)
 		return FALSE;
 
 	/* additional GUID based on VID/PID and target area to flash
-	 * needed to distinguish images aimed to different banks*/
-	devid0 = g_strdup_printf("HIDRAW\\VEN_%04X&DEV_%04X&BOARD_%s&BL_%s",
-				 fu_udev_device_get_vendor(FU_UDEV_DEVICE(device)),
-				 fu_udev_device_get_model(FU_UDEV_DEVICE(device)),
-				 self->board_name,
-				 self->bl_name);
-	fu_device_add_guid(device, devid0);
-	devid1 = g_strdup_printf("HIDRAW\\VEN_%04X&DEV_%04X&BOARD_%s&BL_%s&BANK_%01X",
-				 fu_udev_device_get_vendor(FU_UDEV_DEVICE(device)),
-				 fu_udev_device_get_model(FU_UDEV_DEVICE(device)),
-				 self->board_name,
-				 self->bl_name,
-				 self->flash_area_id);
-	fu_device_add_guid(device, devid1);
+	 * needed to distinguish images aimed to different bootloaders */
+	target_id = g_strdup_printf("HIDRAW\\VEN_%04X&DEV_%04X&BOARD_%s&BL_%s",
+				    fu_udev_device_get_vendor(FU_UDEV_DEVICE(device)),
+				    fu_udev_device_get_model(FU_UDEV_DEVICE(device)),
+				    self->board_name,
+				    self->bl_name);
+	fu_device_add_guid(device, target_id);
 	return TRUE;
 }
 
