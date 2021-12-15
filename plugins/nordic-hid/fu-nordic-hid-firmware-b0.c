@@ -6,8 +6,6 @@
 
 #include "config.h"
 
-#include <fwupdplugin.h>
-
 #include "fu-nordic-hid-firmware-b0.h"
 
 #define UPDATE_IMAGE_MAGIC_COMMON 0x281ee6de
@@ -16,20 +14,10 @@
 #define UPDATE_IMAGE_MAGIC_NRF53  0x00003502
 
 struct _FuNordicHidFirmwareB0 {
-	FuIhexFirmwareClass parent_instance;
-	guint32 crc32;
+	FuNordicHidFirmwareCommonClass parent_instance;
 };
 
-G_DEFINE_TYPE(FuNordicHidFirmwareB0, fu_nordic_hid_firmware_b0, FU_TYPE_FIRMWARE)
-
-static void
-fu_nordic_hid_firmware_b0_export(FuFirmware *firmware,
-				 FuFirmwareExportFlags flags,
-				 XbBuilderNode *bn)
-{
-	FuNordicHidFirmwareB0 *self = FU_NORDIC_HID_FIRMWARE_B0(firmware);
-	fu_xmlb_builder_insert_kx(bn, "crc32", self->crc32);
-}
+G_DEFINE_TYPE(FuNordicHidFirmwareB0, fu_nordic_hid_firmware_b0, FU_TYPE_NORDIC_HID_FIRMWARE_COMMON)
 
 static GBytes *
 fu_nordic_hid_firmware_b0_write(FuFirmware *firmware, GError **error)
@@ -98,32 +86,6 @@ fu_nordic_hid_firmware_b0_read_fwinfo(guint8 const *buf, gsize bufsz, GError **e
 	return FALSE;
 }
 
-static guint32
-fu_nordic_hid_firmware_b0_crc32(const guint8 *buf, gsize bufsz)
-{
-	guint crc32 = 0x01;
-	/* maybe skipped "^" step in fu_common_crc32_full()?
-	 * according https://github.com/madler/zlib/blob/master/crc32.c#L225 */
-	crc32 ^= 0xFFFFFFFFUL;
-	return fu_common_crc32_full(buf, bufsz, crc32, 0xEDB88320);
-}
-
-static gchar *
-fu_nordic_hid_firmware_b0_get_checksum(FuFirmware *firmware,
-				       GChecksumType csum_kind,
-				       GError **error)
-{
-	FuNordicHidFirmwareB0 *self = FU_NORDIC_HID_FIRMWARE_B0(firmware);
-	if (!fu_firmware_has_flag(firmware, FU_FIRMWARE_FLAG_HAS_CHECKSUM)) {
-		g_set_error_literal(error,
-				    G_IO_ERROR,
-				    G_IO_ERROR_NOT_SUPPORTED,
-				    "unable to calculate the checksum of the update binary");
-		return NULL;
-	}
-	return g_strdup_printf("%x", self->crc32);
-}
-
 static gboolean
 fu_nordic_hid_firmware_b0_parse(FuFirmware *firmware,
 				GBytes *fw,
@@ -132,9 +94,12 @@ fu_nordic_hid_firmware_b0_parse(FuFirmware *firmware,
 				FwupdInstallFlags flags,
 				GError **error)
 {
-	FuNordicHidFirmwareB0 *self = FU_NORDIC_HID_FIRMWARE_B0(firmware);
 	const guint8 *buf;
 	gsize bufsz = 0;
+
+	if (!FU_FIRMWARE_CLASS(fu_nordic_hid_firmware_b0_parent_class)
+		 ->parse(firmware, fw, addr_start, addr_end, flags, error))
+		return FALSE;
 
 	buf = g_bytes_get_data(fw, &bufsz);
 	if (buf == NULL) {
@@ -144,16 +109,8 @@ fu_nordic_hid_firmware_b0_parse(FuFirmware *firmware,
 				    "unable to get the image binary");
 		return FALSE;
 	}
-	if (!fu_nordic_hid_firmware_b0_read_fwinfo(buf, bufsz, error))
-		return FALSE;
-	self->crc32 = fu_nordic_hid_firmware_b0_crc32(buf, bufsz);
-	fu_firmware_add_flag(FU_FIRMWARE(self), FU_FIRMWARE_FLAG_HAS_CHECKSUM);
 
-	/* do not strip the header */
-	fu_firmware_set_bytes(firmware, fw);
-
-	/* success */
-	return TRUE;
+	return fu_nordic_hid_firmware_b0_read_fwinfo(buf, bufsz, error);
 }
 
 static void
@@ -165,8 +122,6 @@ static void
 fu_nordic_hid_firmware_b0_class_init(FuNordicHidFirmwareB0Class *klass)
 {
 	FuFirmwareClass *klass_firmware = FU_FIRMWARE_CLASS(klass);
-	klass_firmware->get_checksum = fu_nordic_hid_firmware_b0_get_checksum;
-	klass_firmware->export = fu_nordic_hid_firmware_b0_export;
 	klass_firmware->parse = fu_nordic_hid_firmware_b0_parse;
 	klass_firmware->write = fu_nordic_hid_firmware_b0_write;
 }
