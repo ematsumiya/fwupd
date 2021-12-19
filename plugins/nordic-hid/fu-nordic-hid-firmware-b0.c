@@ -27,6 +27,10 @@ fu_nordic_hid_firmware_b0_write(FuFirmware *firmware, GError **error)
 	fu_byte_array_append_uint32(buf, UPDATE_IMAGE_MAGIC_COMMON, G_LITTLE_ENDIAN);
 	fu_byte_array_append_uint32(buf, UPDATE_IMAGE_MAGIC_FWINFO, G_LITTLE_ENDIAN);
 	fu_byte_array_append_uint32(buf, UPDATE_IMAGE_MAGIC_NRF52, G_LITTLE_ENDIAN);
+	fu_byte_array_append_uint32(buf, 0x00, G_LITTLE_ENDIAN);
+	fu_byte_array_append_uint32(buf, 0x00, G_LITTLE_ENDIAN);
+	/* version */
+	fu_byte_array_append_uint32(buf, 0x63, G_LITTLE_ENDIAN);
 	blob = fu_firmware_get_bytes(firmware, error);
 	if (blob == NULL)
 		return NULL;
@@ -35,13 +39,21 @@ fu_nordic_hid_firmware_b0_write(FuFirmware *firmware, GError **error)
 }
 
 static gboolean
-fu_nordic_hid_firmware_b0_read_fwinfo(guint8 const *buf, gsize bufsz, GError **error)
+fu_nordic_hid_firmware_b0_read_fwinfo(FuFirmware *firmware,
+				      guint8 const *buf,
+				      gsize bufsz,
+				      GError **error)
 {
 	guint32 magic_common;
 	guint32 magic_fwinfo;
 	guint32 magic_compat;
 	guint32 offset;
 	guint32 hdr_offset[5] = {0x0000, 0x0200, 0x400, 0x800, 0x1000};
+	guint8 ver_major = 0;
+	guint8 ver_minor = 0;
+	guint16 ver_rev = 0;
+	guint32 ver_build_nr = 0;
+	g_autofree gchar *version = NULL;
 
 	/* find correct offset to fwinfo */
 	for (guint32 i = 0; i < G_N_ELEMENTS(hdr_offset); i++) {
@@ -67,12 +79,28 @@ fu_nordic_hid_firmware_b0_read_fwinfo(guint8 const *buf, gsize bufsz, GError **e
 						G_LITTLE_ENDIAN,
 						error))
 			return FALSE;
+		/* version */
+		if (!fu_common_read_uint32_safe(buf,
+						bufsz,
+						offset + 0x14,
+						&ver_build_nr,
+						G_LITTLE_ENDIAN,
+						error))
+			return FALSE;
+
 		if (magic_common != UPDATE_IMAGE_MAGIC_COMMON ||
 		    magic_fwinfo != UPDATE_IMAGE_MAGIC_FWINFO)
 			continue;
 		switch (magic_compat) {
 		case UPDATE_IMAGE_MAGIC_NRF52:
 		case UPDATE_IMAGE_MAGIC_NRF53:
+			/* currently only the build number is saved into the image */
+			version = g_strdup_printf("%u.%u.%u.%u",
+						  ver_major,
+						  ver_minor,
+						  ver_rev,
+						  ver_build_nr);
+			fu_firmware_set_version(firmware, version);
 			return TRUE;
 		default:
 			break;
@@ -110,7 +138,7 @@ fu_nordic_hid_firmware_b0_parse(FuFirmware *firmware,
 		return FALSE;
 	}
 
-	return fu_nordic_hid_firmware_b0_read_fwinfo(buf, bufsz, error);
+	return fu_nordic_hid_firmware_b0_read_fwinfo(firmware, buf, bufsz, error);
 }
 
 static void
